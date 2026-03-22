@@ -15,6 +15,7 @@ import (
 
 type ProfileService interface {
 	GetProfile(ctx context.Context, userID string) (*dto.ProfileResponse, error)
+	CreateProfile(ctx context.Context, userID string, name string) (*dto.ProfileResponse, error)
 	UpdateProfile(ctx context.Context, userID string, req dto.UpdateProfileRequest) (*dto.ProfileResponse, error)
 	UploadPhoto(ctx context.Context, userID string, base64Image string) (*dto.UploadPhotoResponse, error)
 	DeletePhoto(ctx context.Context, userID string) (*dto.DeletePhotoResponse, error)
@@ -53,6 +54,24 @@ func (s *profileService) GetProfile(ctx context.Context, userID string) (*dto.Pr
 		if err := s.repo.Create(ctx, profile); err != nil {
 			return nil, fmt.Errorf("failed to create profile: %w", err)
 		}
+	}
+
+	return toProfileResponse(profile), nil
+}
+
+func (s *profileService) CreateProfile(ctx context.Context, userID string, name string) (*dto.ProfileResponse, error) {
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid user ID: %w", err)
+	}
+
+	profile := &model.Profile{
+		UserID:   userUUID,
+		Fullname: name,
+		PhotoURL: "",
+	}
+	if err := s.repo.Create(ctx, profile); err != nil {
+		return nil, fmt.Errorf("failed to create profile: %w", err)
 	}
 
 	return toProfileResponse(profile), nil

@@ -49,6 +49,32 @@ func (s *profileServer) GetProfile(ctx context.Context, req *ppb.GetProfileReque
 	return toProtoProfile(profile), nil
 }
 
+// CreateProfile creates a new user profile
+func (s *profileServer) CreateProfile(ctx context.Context, req *ppb.CreateProfileRequest) (*ppb.Profile, error) {
+	userID := req.GetUserId()
+	if userID == "" {
+		userID = interceptor.UserIDFromContext(ctx)
+	}
+
+	profile, err := s.profileService.CreateProfile(ctx, userID, req.GetFullname())
+	if err != nil {
+		log.Error(data.LogCreateProfileFailed, map[string]any{
+			data.LogFieldService: data.GRPCService,
+			data.LogFieldUserID:  userID,
+			data.LogFieldError:   err.Error(),
+		})
+		return nil, err
+	}
+
+	log.Info(data.LogCreateProfileSuccess, map[string]any{
+		data.LogFieldService:   data.GRPCService,
+		data.LogFieldUserID:    userID,
+		data.LogFieldProfileID: profile.ID,
+	})
+
+	return toProtoProfile(profile), nil
+}
+
 // UpdateProfile updates user profile
 func (s *profileServer) UpdateProfile(ctx context.Context, req *ppb.UpdateProfileRequest) (*ppb.Profile, error) {
 	userID := req.GetUserId()
