@@ -2,6 +2,10 @@ package data
 
 // Service names for logging
 const (
+	DEVELOPMENT_MODE = "development"
+	STAGING_MODE     = "staging"
+	PRODUCTION_MODE  = "production"
+	
 	EnvService      = "ENV"
 	DatabaseService = "DATABASE"
 	MinioService    = "MINIO"

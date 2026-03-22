@@ -51,7 +51,6 @@ type MinIOConfig struct {
 	MaxConnections int
 	ConnectTimeout time.Duration
 	RequestTimeout time.Duration
-	BucketName     string
 }
 
 // Global MinIO manager - singleton pattern seperti database/redis
@@ -71,18 +70,17 @@ var (
 // Init initializes global MinIO manager - dipanggil sekali di main.go
 func SetupMinio(cfg env.Minio) *MinIOManager {
 	once.Do(func() {
-		minioCfg := MinIOConfig{
+		cfg := MinIOConfig{
 			Host:           cfg.Host,
 			AccessKey:      cfg.AccessKey,
 			SecretKey:      cfg.SecretKey,
 			UseSSL:         cfg.UseSSL == 1,
 			ConnectTimeout: 30 * time.Second,
 			RequestTimeout: 60 * time.Second,
-			BucketName:     cfg.BucketName,
 		}
 
 		var err error
-		MinioClient, err = newMinIOManager(minioCfg)
+		MinioClient, err = newMinIOManager(cfg)
 		if err != nil {
 			log.Log.Fatalf("Failed to initialize MinIO: %v", err)
 		}
@@ -111,21 +109,21 @@ func newMinIOManager(cfg MinIOConfig) (*MinIOManager, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConnectTimeout)
 	defer cancel()
 
-	exists, err := client.BucketExists(ctx, cfg.BucketName)
+	exists, err := client.BucketExists(ctx, PROFILE_PHOTO_BUCKET)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check bucket: %v", err)
 	}
 
 	if !exists {
 		// Create bucket if not exists
-		err = client.MakeBucket(ctx, cfg.BucketName, minio.MakeBucketOptions{})
+		err = client.MakeBucket(ctx, PROFILE_PHOTO_BUCKET, minio.MakeBucketOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create bucket: %v", err)
 		}
-		log.Info(constant.LogMinioBucketCreated, map[string]any{"bucket": cfg.BucketName})
+		log.Info(constant.LogMinioBucketCreated, map[string]any{"bucket": PROFILE_PHOTO_BUCKET})
 	}
 
-	manager.bucketCache[cfg.BucketName] = true
+	manager.bucketCache[PROFILE_PHOTO_BUCKET] = true
 	manager.isReady = true
 
 	return manager, nil
@@ -138,228 +136,390 @@ func (m *MinIOManager) GetClient() *minio.Client {
 	return m.client
 }
 
-// GetBucketName returns the configured bucket name
-func (m *MinIOManager) GetBucketName() string {
-	return m.config.BucketName
-}
-
-// IsReady checks if MinIO is ready
+// Health check method
 func (m *MinIOManager) IsReady() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.isReady
 }
 
-// UploadBase64 uploads a base64 encoded file
-func (m *MinIOManager) UploadBase64(ctx context.Context, req UploadRequest) (*UploadResponse, error) {
-	if !m.IsReady() {
-		return nil, fmt.Errorf("minio client is not ready")
+// validateBucket checks if bucket exists with caching
+func (m *MinIOManager) validateBucket(ctx context.Context, bucketName string) error {
+	if bucketName == "" {
+		return fmt.Errorf("bucket name cannot be empty")
 	}
 
-	// Decode base64
-	data, ext, err := decodeBase64Image(req.Base64Data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode base64: %v", err)
+	// Basic validation
+	if len(bucketName) < 3 || len(bucketName) > 63 {
+		return fmt.Errorf("bucket name must be between 3 and 63 characters")
+	}
+	if strings.Contains(bucketName, " ") || strings.Contains(bucketName, "_") {
+		return fmt.Errorf("bucket name cannot contain spaces or underscores")
 	}
 
-	// Validate if rules provided
-	if req.Validation != nil {
-		if err := validateFile(data, ext, req.Validation); err != nil {
-			return nil, err
+	// Check cache first
+	m.mu.RLock()
+	if exists, found := m.bucketCache[bucketName]; found {
+		m.mu.RUnlock()
+		if !exists {
+			return fmt.Errorf("bucket '%s' not found", bucketName)
 		}
+		return nil
 	}
+	m.mu.RUnlock()
 
-	// Generate unique filename
-	objectName := fmt.Sprintf("%s_%d%s", req.Prefix, time.Now().UnixNano(), ext)
-
-	// Get content type
-	contentType := getContentType(ext)
-
-	// Upload
-	bucketName := req.BucketName
-	if bucketName == "" {
-		bucketName = m.config.BucketName
-	}
-
-	info, err := m.client.PutObject(ctx, bucketName, objectName, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
-		ContentType: contentType,
-	})
+	// Check bucket existence
+	exists, err := m.client.BucketExists(ctx, bucketName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to upload: %v", err)
+		return fmt.Errorf("failed to check bucket existence: %v", err)
 	}
 
-	// Generate URL
-	objectURL := m.GetObjectURL(bucketName, objectName)
+	// Update cache
+	m.mu.Lock()
+	m.bucketCache[bucketName] = exists
+	m.mu.Unlock()
 
-	return &UploadResponse{
-		BucketName: bucketName,
-		ObjectName: objectName,
-		Size:       info.Size,
-		URL:        objectURL,
-		Ext:        ext,
-		ETag:       info.ETag,
-	}, nil
-}
-
-// DeleteObject deletes an object from MinIO
-func (m *MinIOManager) DeleteObject(ctx context.Context, bucketName, objectName string) error {
-	if !m.IsReady() {
-		return fmt.Errorf("minio client is not ready")
-	}
-
-	if bucketName == "" {
-		bucketName = m.config.BucketName
-	}
-
-	err := m.client.RemoveObject(ctx, bucketName, objectName, minio.RemoveObjectOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to delete object: %v", err)
+	if !exists {
+		return fmt.Errorf("bucket '%s' not found", bucketName)
 	}
 
 	return nil
 }
 
-// GetObjectURL generates URL for an object
-func (m *MinIOManager) GetObjectURL(bucketName, objectName string) string {
-	protocol := "http"
-	if m.config.UseSSL {
-		protocol = "https"
-	}
-	return fmt.Sprintf("%s://%s/%s/%s", protocol, m.config.Host, bucketName, objectName)
-}
-
-// ExtractObjectName extracts object name from URL
-func (m *MinIOManager) ExtractObjectName(photoURL string) (string, error) {
-	if photoURL == "" {
-		return "", fmt.Errorf("empty photo URL")
+// DecodeFile decodes base64 string to byte array and extracts content type
+func (m *MinIOManager) DecodeFile(base64Data string) ([]byte, string, error) {
+	if base64Data == "" {
+		return nil, "", fmt.Errorf("base64 data cannot be empty")
 	}
 
-	u, err := url.Parse(photoURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid URL: %v", err)
-	}
-
-	// Path format: /bucket/objectName
-	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
-	if len(parts) < 2 {
-		return "", fmt.Errorf("invalid URL format")
-	}
-
-	return parts[1], nil
-}
-
-// Helper functions
-
-func decodeBase64Image(base64Data string) ([]byte, string, error) {
-	// Handle data URL format: data:image/png;base64,xxxxx
+	var contentType string
+	// Extract content type from data URL if exists
 	if strings.HasPrefix(base64Data, "data:") {
-		parts := strings.SplitN(base64Data, ",", 2)
-		if len(parts) != 2 {
-			return nil, "", fmt.Errorf("invalid data URL format")
+		if idx := strings.Index(base64Data, ";base64,"); idx != -1 {
+			contentType = base64Data[5:idx]
+			base64Data = base64Data[idx+8:]
 		}
-
-		// Extract extension from mime type
-		mimeType := strings.TrimPrefix(parts[0], "data:")
-		mimeType = strings.TrimSuffix(mimeType, ";base64")
-		ext := mimeTypeToExt(mimeType)
-
-		data, err := base64.StdEncoding.DecodeString(parts[1])
-		if err != nil {
-			return nil, "", err
-		}
-
-		return data, ext, nil
 	}
 
-	// Plain base64
-	data, err := base64.StdEncoding.DecodeString(base64Data)
+	// Decode base64
+	decoded, err := base64.StdEncoding.DecodeString(base64Data)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("failed to decode base64: %v", err)
 	}
 
-	// Detect extension from magic bytes
-	ext := detectExtension(data)
-	return data, ext, nil
+	// If content type not found, detect from content
+	if contentType == "" {
+		contentType = getContentTypeFromData(decoded)
+	}
+
+	return decoded, contentType, nil
 }
 
-func mimeTypeToExt(mimeType string) string {
-	switch mimeType {
-	case "image/jpeg", "image/jpg":
-		return ".jpg"
-	case "image/png":
-		return ".png"
-	case "image/gif":
-		return ".gif"
-	case "image/webp":
-		return ".webp"
-	default:
-		return ".jpg" // default
-	}
-}
+// Validate validates file based on provided rules
+func (m *MinIOManager) Validate(data []byte, contentType string, config *FileValidationConfig) error {
+	fileSize := int64(len(data))
 
-func detectExtension(data []byte) string {
-	if len(data) < 4 {
-		return ".jpg"
+	if config.MaxFileSize > 0 && fileSize > config.MaxFileSize {
+		return fmt.Errorf("file size (%d bytes) exceeds maximum allowed size (%d bytes)",
+			fileSize, config.MaxFileSize)
+	}
+	if config.MinFileSize > 0 && fileSize < config.MinFileSize {
+		return fmt.Errorf("file size (%d bytes) is below minimum required size (%d bytes)",
+			fileSize, config.MinFileSize)
 	}
 
-	// PNG
-	if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
-		return ".png"
-	}
-	// JPEG
-	if data[0] == 0xFF && data[1] == 0xD8 {
-		return ".jpg"
-	}
-	// GIF
-	if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
-		return ".gif"
-	}
-	// WEBP
-	if len(data) >= 12 && string(data[8:12]) == "WEBP" {
-		return ".webp"
-	}
+	// Validate file extension
+	if len(config.AllowedExtensions) > 0 {
+		ext := getExtensionFromContentType(contentType)
+		if ext == "" {
+			return fmt.Errorf("unable to determine file extension from content type: %s", contentType)
+		}
 
-	return ".jpg"
-}
-
-func getContentType(ext string) string {
-	switch ext {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	default:
-		return "application/octet-stream"
-	}
-}
-
-func validateFile(data []byte, ext string, cfg *FileValidationConfig) error {
-	// Check size
-	size := int64(len(data))
-	if cfg.MaxFileSize > 0 && size > cfg.MaxFileSize {
-		return fmt.Errorf("file size %d exceeds maximum %d bytes", size, cfg.MaxFileSize)
-	}
-	if cfg.MinFileSize > 0 && size < cfg.MinFileSize {
-		return fmt.Errorf("file size %d is below minimum %d bytes", size, cfg.MinFileSize)
-	}
-
-	// Check extension
-	if len(cfg.AllowedExtensions) > 0 {
 		allowed := false
-		for _, e := range cfg.AllowedExtensions {
-			if ext == e {
+		for _, allowedExt := range config.AllowedExtensions {
+			if ext == strings.ToLower(allowedExt) {
 				allowed = true
 				break
 			}
 		}
 		if !allowed {
-			return fmt.Errorf("extension %s is not allowed", ext)
+			return fmt.Errorf("file type '%s' (extension '%s') is not allowed. Allowed extensions: %v",
+				contentType, ext, config.AllowedExtensions)
+		}
+	}
+
+	// Content consistency check
+	if len(data) > 0 {
+		detectedType := getContentTypeFromData(data)
+		if detectedType != "application/octet-stream" && contentType != detectedType {
+			log.Warn("content_type_mismatch", map[string]any{
+				"service":       constant.MinioService,
+				"declared_type": contentType,
+				"detected_type": detectedType,
+			})
 		}
 	}
 
 	return nil
+}
+
+// UploadFile uploads file to MinIO - main method yang digunakan
+func (m *MinIOManager) UploadFile(ctx context.Context, request UploadRequest) (*UploadResponse, error) {
+	if !m.IsReady() {
+		return nil, fmt.Errorf("MinIO client not ready")
+	}
+
+	// Validate bucket
+	if err := m.validateBucket(ctx, request.BucketName); err != nil {
+		return nil, err
+	}
+
+	// Decode and validate file
+	data, contentType, err := m.DecodeFile(request.Base64Data)
+	if err != nil {
+		return nil, fmt.Errorf("decode error: %v", err)
+	}
+
+	if request.Validation == nil {
+		request.Validation = CreateDefaultValidationConfig()
+	}
+
+	if err := m.Validate(data, contentType, request.Validation); err != nil {
+		return nil, fmt.Errorf("validation error: %v", err)
+	}
+
+	// Generate object name
+	ext := getExtensionFromContentType(contentType)
+	if ext == "" {
+		ext = ".bin"
+	}
+
+	prefix := request.Prefix
+	if prefix == "" {
+		prefix = "file"
+	}
+
+	timestamp := time.Now().Unix()
+	objectName := fmt.Sprintf("%s_%d%s", prefix, timestamp, ext)
+
+	// Upload file
+	reader := bytes.NewReader(data)
+	options := minio.PutObjectOptions{
+		ContentType: contentType,
+	}
+
+	info, err := m.client.PutObject(ctx, request.BucketName, objectName, reader, int64(len(data)), options)
+	if err != nil {
+		return nil, fmt.Errorf("upload failed: %v", err)
+	}
+
+	// Generate URL
+	url := fmt.Sprintf("%s://%s/%s/%s",
+		getProtocol(m.config.UseSSL),
+		m.config.Host,
+		request.BucketName,
+		objectName)
+
+	return &UploadResponse{
+		BucketName: request.BucketName,
+		ObjectName: objectName,
+		Size:       info.Size,
+		URL:        url,
+		Ext:        ext,
+		ETag:       info.ETag,
+	}, nil
+}
+
+// GetFile retrieves file from MinIO
+func (m *MinIOManager) GetFile(ctx context.Context, bucketName, objectName string) (*minio.Object, error) {
+	if !m.IsReady() {
+		return nil, fmt.Errorf("MinIO client not ready")
+	}
+
+	if err := m.validateBucket(ctx, bucketName); err != nil {
+		return nil, err
+	}
+
+	return m.client.GetObject(ctx, bucketName, objectName, minio.GetObjectOptions{})
+}
+
+// DeleteFile deletes file from MinIO
+func (m *MinIOManager) DeleteFile(ctx context.Context, bucketName, objectName string) error {
+	if !m.IsReady() {
+		return fmt.Errorf("MinIO client not ready")
+	}
+
+	if err := m.validateBucket(ctx, bucketName); err != nil {
+		return err
+	}
+
+	return m.client.RemoveObject(ctx, bucketName, objectName, minio.RemoveObjectOptions{})
+}
+
+// GetPresignedURL generates presigned URL for direct access
+func (m *MinIOManager) GetPresignedURL(ctx context.Context, bucketName, objectName string, expires time.Duration) (string, error) {
+	if !m.IsReady() {
+		return "", fmt.Errorf("MinIO client not ready")
+	}
+
+	if err := m.validateBucket(ctx, bucketName); err != nil {
+		return "", err
+	}
+
+	url, err := m.client.PresignedGetObject(ctx, bucketName, objectName, expires, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate presigned URL: %v", err)
+	}
+
+	return url.String(), nil
+}
+
+// ListObjects lists objects in bucket with prefix
+func (m *MinIOManager) ListObjects(ctx context.Context, bucketName, prefix string) ([]minio.ObjectInfo, error) {
+	if !m.IsReady() {
+		return nil, fmt.Errorf("MinIO client not ready")
+	}
+
+	if err := m.validateBucket(ctx, bucketName); err != nil {
+		return nil, err
+	}
+
+	var objects []minio.ObjectInfo
+	objectCh := m.client.ListObjects(ctx, bucketName, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	})
+
+	for object := range objectCh {
+		if object.Err != nil {
+			return nil, object.Err
+		}
+		objects = append(objects, object)
+	}
+
+	return objects, nil
+}
+
+// Helper functions - tetap sama
+func getContentTypeFromData(data []byte) string {
+	if len(data) == 0 {
+		return "application/octet-stream"
+	}
+
+	signatures := map[string]string{
+		"\xFF\xD8\xFF":      "image/jpeg",
+		"\x89PNG\r\n\x1A\n": "image/png",
+		"GIF87a":            "image/gif",
+		"GIF89a":            "image/gif",
+		"\x00\x00\x01\x00":  "image/x-icon",
+		"RIFF":              "image/webp",
+		"%PDF":              "application/pdf",
+		"PK\x03\x04":        "application/zip",
+		"PK\x05\x06":        "application/zip",
+		"PK\x07\x08":        "application/zip",
+	}
+
+	dataStr := string(data[:min(len(data), 10)])
+	for signature, contentType := range signatures {
+		if strings.HasPrefix(dataStr, signature) {
+			return contentType
+		}
+	}
+	return "application/octet-stream"
+}
+
+func getExtensionFromContentType(contentType string) string {
+	extensions := map[string]string{
+		"image/jpeg":               ".jpg",
+		"image/jpg":                ".jpg",
+		"image/png":                ".png",
+		"image/gif":                ".gif",
+		"image/webp":               ".webp",
+		"image/x-icon":             ".ico",
+		"image/vnd.microsoft.icon": ".ico",
+		"application/pdf":          ".pdf",
+		"application/zip":          ".zip",
+		"application/json":         ".json",
+		"text/plain":               ".txt",
+		"text/html":                ".html",
+		"text/css":                 ".css",
+		"text/javascript":          ".js",
+		"application/javascript":   ".js",
+		"video/mp4":                ".mp4",
+		"video/webm":               ".webm",
+		"audio/mp3":                ".mp3",
+		"audio/mpeg":               ".mp3",
+		"audio/wav":                ".wav",
+		"application/msword":       ".doc",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+		"application/vnd.ms-excel": ".xls",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+	}
+
+	if ext, exists := extensions[contentType]; exists {
+		return ext
+	}
+	if parts := strings.Split(contentType, "/"); len(parts) == 2 {
+		return "." + parts[1]
+	}
+	return ""
+}
+
+func getProtocol(useSSL bool) string {
+	if useSSL {
+		return "https"
+	}
+	return "http"
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func CreateDefaultValidationConfig() *FileValidationConfig {
+	return &FileValidationConfig{
+		AllowedExtensions: []string{".jpg", ".jpeg", ".png", ".gif", ".pdf", ".doc", ".docx"},
+		MaxFileSize:       10 * 1024 * 1024, // 10MB
+		MinFileSize:       1,                // 1 byte
+	}
+}
+
+func CreateImageValidationConfig() *FileValidationConfig {
+	return &FileValidationConfig{
+		AllowedExtensions: []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf"},
+		MaxFileSize:       5 * 1024 * 1024, // 5MB
+		MinFileSize:       1,               // 1 byte
+	}
+}
+
+// ParseMinioURL menerima URL MinIO/S3 dan mengembalikan bucket + objectKey
+func ParseMinioURL(rawURL string) (bucket, objectKey string, err error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", err
+	}
+
+	// path selalu dimulai dengan "/", jadi hapus dulu
+	path := strings.TrimPrefix(u.Path, "/")
+
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) < 2 {
+		return "", "", fmt.Errorf("URL is not valid: %s", rawURL)
+	}
+
+	bucket = parts[0]
+	objectKey = parts[1]
+	return bucket, objectKey, nil
+}
+
+func ExtractObjectNameFromURL(url string) string {
+	// Split by "/" and get the last part
+	parts := strings.Split(url, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return ""
 }

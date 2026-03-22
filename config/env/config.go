@@ -30,7 +30,6 @@ type (
 		SecretKey   string `env:"MINIO_ROOT_PASSWORD"`
 		MaxOpenConn int    `env:"MINIO_MAX_OPEN_CONN"`
 		UseSSL      int    `env:"MINIO_USE_SSL"`
-		BucketName  string `env:"MINIO_BUCKET_NAME"`
 	}
 
 	Config struct {
@@ -92,14 +91,21 @@ func LoadNative() ([]string, error) {
 	if Cfg.Minio.SecretKey, ok = os.LookupEnv("MINIO_ROOT_PASSWORD"); !ok {
 		missing = append(missing, "MINIO_ROOT_PASSWORD env is not set")
 	}
-	if maxConn, ok := os.LookupEnv("MINIO_MAX_OPEN_CONN"); ok {
-		Cfg.Minio.MaxOpenConn, _ = strconv.Atoi(maxConn)
+	if val, ok := os.LookupEnv("MINIO_MAX_OPEN_CONN"); !ok {
+		missing = append(missing, "MINIO_MAX_OPEN_CONN env is not set")
+	} else {
+		var err error
+		if Cfg.Minio.MaxOpenConn, err = strconv.Atoi(val); err != nil {
+			missing = append(missing, fmt.Sprintf("MINIO_MAX_OPEN_CONN must be int, got %s", val))
+		}
 	}
-	if useSSL, ok := os.LookupEnv("MINIO_USE_SSL"); ok {
-		Cfg.Minio.UseSSL, _ = strconv.Atoi(useSSL)
-	}
-	if Cfg.Minio.BucketName, ok = os.LookupEnv("MINIO_BUCKET_NAME"); !ok {
-		Cfg.Minio.BucketName = "profile-photos" // default bucket name
+	if val, ok := os.LookupEnv("MINIO_USE_SSL"); !ok {
+		missing = append(missing, "MINIO_USE_SSL env is not set")
+	} else {
+		var err error
+		if Cfg.Minio.UseSSL, err = strconv.Atoi(val); err != nil {
+			missing = append(missing, fmt.Sprintf("MINIO_USE_SSL must be int, got %s", val))
+		}
 	}
 	// ! ______________________________________________________
 
@@ -109,55 +115,64 @@ func LoadNative() ([]string, error) {
 func LoadByViper() ([]string, error) {
 	var missing []string
 
-	viper.SetConfigFile("config.json")
-
-	if err := viper.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf("error reading config file: %w", err)
+	config := viper.New()
+	if configFile, err := os.Stat("/app/config.json"); err != nil || configFile.IsDir() {
+		config.SetConfigFile("config.json")
+	} else {
+		config.SetConfigFile("/app/config.json")
 	}
 
-	// Server configuration
-	if Cfg.Server.Mode = viper.GetString("server.mode"); Cfg.Server.Mode == "" {
-		missing = append(missing, "server.mode not set in config.json")
-	}
-	if Cfg.Server.HTTPPort = viper.GetString("server.http_port"); Cfg.Server.HTTPPort == "" {
-		missing = append(missing, "server.http_port not set in config.json")
-	}
-	if Cfg.Server.GRPCPort = viper.GetString("server.grpc_port"); Cfg.Server.GRPCPort == "" {
-		missing = append(missing, "server.grpc_port not set in config.json")
+	if err := config.ReadInConfig(); err != nil {
+		return nil, err
 	}
 
-	// Database configuration
-	if Cfg.Database.DBUser = viper.GetString("database.user"); Cfg.Database.DBUser == "" {
-		missing = append(missing, "database.user not set in config.json")
+	// ! Load Server configuration ____________________________
+	if Cfg.Server.Mode = config.GetString("MODE"); Cfg.Server.Mode == "" {
+		missing = append(missing, "MODE env is not set")
 	}
-	if Cfg.Database.DBHost = viper.GetString("database.host"); Cfg.Database.DBHost == "" {
-		missing = append(missing, "database.host not set in config.json")
+	if Cfg.Server.HTTPPort = config.GetString("HTTP_PORT"); Cfg.Server.HTTPPort == "" {
+		missing = append(missing, "HTTP_PORT env is not set")
 	}
-	if Cfg.Database.DBPort = viper.GetString("database.port"); Cfg.Database.DBPort == "" {
-		missing = append(missing, "database.port not set in config.json")
+	if Cfg.Server.GRPCPort = config.GetString("GRPC_PORT"); Cfg.Server.GRPCPort == "" {
+		missing = append(missing, "GRPC_PORT env is not set")
 	}
-	if Cfg.Database.DBName = viper.GetString("database.name"); Cfg.Database.DBName == "" {
-		missing = append(missing, "database.name not set in config.json")
-	}
-	if Cfg.Database.DBPassword = viper.GetString("database.password"); Cfg.Database.DBPassword == "" {
-		missing = append(missing, "database.password not set in config.json")
-	}
+	// ! ______________________________________________________
 
-	// MinIO configuration
-	if Cfg.Minio.Host = viper.GetString("minio.host"); Cfg.Minio.Host == "" {
-		missing = append(missing, "minio.host not set in config.json")
+	// ! Load Database configuration __________________________
+	if Cfg.Database.DBUser = config.GetString("DATABASE.POSTGRESQL.USER"); Cfg.Database.DBUser == "" {
+		missing = append(missing, "DATABASE.POSTGRESQL.USER env is not set")
 	}
-	if Cfg.Minio.AccessKey = viper.GetString("minio.access_key"); Cfg.Minio.AccessKey == "" {
-		missing = append(missing, "minio.access_key not set in config.json")
+	if Cfg.Database.DBHost = config.GetString("DATABASE.POSTGRESQL.HOST"); Cfg.Database.DBHost == "" {
+		missing = append(missing, "DATABASE.POSTGRESQL.HOST env is not set")
 	}
-	if Cfg.Minio.SecretKey = viper.GetString("minio.secret_key"); Cfg.Minio.SecretKey == "" {
-		missing = append(missing, "minio.secret_key not set in config.json")
+	if Cfg.Database.DBPort = config.GetString("DATABASE.POSTGRESQL.PORT"); Cfg.Database.DBPort == "" {
+		missing = append(missing, "DATABASE.POSTGRESQL.PORT env is not set")
 	}
-	Cfg.Minio.MaxOpenConn = viper.GetInt("minio.max_open_conn")
-	Cfg.Minio.UseSSL = viper.GetInt("minio.use_ssl")
-	if Cfg.Minio.BucketName = viper.GetString("minio.bucket_name"); Cfg.Minio.BucketName == "" {
-		Cfg.Minio.BucketName = "profile-photos"
+	if Cfg.Database.DBName = config.GetString("DATABASE.POSTGRESQL.NAME"); Cfg.Database.DBName == "" {
+		missing = append(missing, "DATABASE.POSTGRESQL.NAME env is not set")
 	}
+	if Cfg.Database.DBPassword = config.GetString("DATABASE.POSTGRESQL.PASSWORD"); Cfg.Database.DBPassword == "" {
+		missing = append(missing, "DATABASE.POSTGRESQL.PASSWORD env is not set")
+	}
+	// ! ______________________________________________________
+
+	// ! Load Minio configuration __________________________
+	if Cfg.Minio.Host = config.GetString("OBJECT-STORAGE.MINIO.HOST"); Cfg.Minio.Host == "" {
+		missing = append(missing, "OBJECT-STORAGE.MINIO.HOST env is not set")
+	}
+	if Cfg.Minio.AccessKey = config.GetString("OBJECT-STORAGE.MINIO.USER"); Cfg.Minio.AccessKey == "" {
+		missing = append(missing, "OBJECT-STORAGE.MINIO.USER env is not set")
+	}
+	if Cfg.Minio.SecretKey = config.GetString("OBJECT-STORAGE.MINIO.PASSWORD"); Cfg.Minio.SecretKey == "" {
+		missing = append(missing, "OBJECT-STORAGE.MINIO.PASSWORD env is not set")
+	}
+	if Cfg.Minio.MaxOpenConn = config.GetInt("OBJECT-STORAGE.MINIO.MAX_OPEN_CONN_POOL"); Cfg.Minio.MaxOpenConn == 0 {
+		missing = append(missing, "OBJECT-STORAGE.MINIO.MAX_OPEN_CONN_POOL env is not set")
+	}
+	if Cfg.Minio.UseSSL = config.GetInt("OBJECT-STORAGE.MINIO.USE_SSL"); Cfg.Minio.UseSSL < 0 || Cfg.Minio.UseSSL > 1 {
+		missing = append(missing, "OBJECT-STORAGE.MINIO.USE_SSL env is not valid")
+	}
+	// ! ______________________________________________________
 
 	return missing, nil
 }

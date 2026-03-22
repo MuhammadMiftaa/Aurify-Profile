@@ -115,16 +115,16 @@ func (s *profileService) UploadPhoto(ctx context.Context, userID string, base64I
 
 	// Delete old photo if exists
 	if profile.PhotoURL != "" {
-		objectName, err := s.minio.ExtractObjectName(profile.PhotoURL)
-		if err == nil {
-			_ = s.minio.DeleteObject(ctx, "", objectName)
+		objectName := miniofs.ExtractObjectNameFromURL(profile.PhotoURL)
+		if err := s.minio.DeleteFile(ctx, "", objectName); err != nil {
+			return nil, fmt.Errorf("failed to delete old photo: %w", err)
 		}
 	}
 
 	// Upload new photo
-	uploadResp, err := s.minio.UploadBase64(ctx, miniofs.UploadRequest{
+	uploadResp, err := s.minio.UploadFile(ctx, miniofs.UploadRequest{
 		Base64Data: base64Image,
-		Prefix:     fmt.Sprintf("profile_%s", userID),
+		Prefix:     fmt.Sprintf("%s_%s", miniofs.PROFILE_PHOTO_PREFIX, userID),
 		Validation: &miniofs.FileValidationConfig{
 			AllowedExtensions: []string{".jpg", ".jpeg", ".png", ".webp"},
 			MaxFileSize:       5 * 1024 * 1024, // 5MB
@@ -168,11 +168,9 @@ func (s *profileService) DeletePhoto(ctx context.Context, userID string) (*dto.D
 
 	// Delete photo from MinIO
 	if profile.PhotoURL != "" {
-		objectName, err := s.minio.ExtractObjectName(profile.PhotoURL)
-		if err == nil {
-			if err := s.minio.DeleteObject(ctx, "", objectName); err != nil {
-				return nil, fmt.Errorf("failed to delete photo: %w", err)
-			}
+		objectName := miniofs.ExtractObjectNameFromURL(profile.PhotoURL)
+		if err := s.minio.DeleteFile(ctx, "", objectName); err != nil {
+			return nil, fmt.Errorf("failed to delete old photo: %w", err)
 		}
 	}
 

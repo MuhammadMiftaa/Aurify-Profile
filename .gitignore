@@ -21,6 +21,7 @@ vendor/
 
 # Env
 .env
+config.json
 
 # OS
 .DS_Store

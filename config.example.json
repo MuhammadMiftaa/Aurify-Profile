@@ -1,0 +1,24 @@
+{
+  "MODE": "development",
+  "HTTP_PORT": "",
+  "GRPC_PORT": "",
+  "JWT_SECRET_KEY": "",
+  "DATABASE": {
+    "POSTGRESQL": {
+      "HOST": "",
+      "PORT": "",
+      "USER": "",
+      "PASSWORD": "",
+      "NAME": ""
+    }
+  },
+  "OBJECT-STORAGE": {
+    "MINIO": {
+      "HOST": "",
+      "USER": "",
+      "PASSWORD": "",
+      "MAX_OPEN_CONN_POOL": 10,
+      "USE_SSL": 0
+    }
+  }
+}
