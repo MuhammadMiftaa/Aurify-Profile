@@ -135,13 +135,14 @@ func (s *profileService) UploadPhoto(ctx context.Context, userID string, base64I
 	// Delete old photo if exists
 	if profile.PhotoURL != "" {
 		objectName := miniofs.ExtractObjectNameFromURL(profile.PhotoURL)
-		if err := s.minio.DeleteFile(ctx, "", objectName); err != nil {
+		if err := s.minio.DeleteFile(ctx, miniofs.PROFILE_PHOTO_BUCKET, objectName); err != nil {
 			return nil, fmt.Errorf("failed to delete old photo: %w", err)
 		}
 	}
 
 	// Upload new photo
 	uploadResp, err := s.minio.UploadFile(ctx, miniofs.UploadRequest{
+		BucketName: miniofs.PROFILE_PHOTO_BUCKET,
 		Base64Data: base64Image,
 		Prefix:     fmt.Sprintf("%s_%s", miniofs.PROFILE_PHOTO_PREFIX, userID),
 		Validation: &miniofs.FileValidationConfig{
@@ -188,7 +189,7 @@ func (s *profileService) DeletePhoto(ctx context.Context, userID string) (*dto.D
 	// Delete photo from MinIO
 	if profile.PhotoURL != "" {
 		objectName := miniofs.ExtractObjectNameFromURL(profile.PhotoURL)
-		if err := s.minio.DeleteFile(ctx, "", objectName); err != nil {
+		if err := s.minio.DeleteFile(ctx, miniofs.PROFILE_PHOTO_BUCKET, objectName); err != nil {
 			return nil, fmt.Errorf("failed to delete old photo: %w", err)
 		}
 	}
