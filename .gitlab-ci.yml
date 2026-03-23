@@ -1,0 +1,225 @@
+# yaml-language-server: $schema=https://gitlab.com/gitlab-org/gitlab/-/raw/HEAD/app/assets/javascripts/editor/schema/ci.json
+
+stages:
+  # - test
+  - build
+  - release
+  - deploy
+  - migrate
+
+variables:
+  TAG_IMAGE: $CI_COMMIT_TAG
+  # SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+  # GIT_DEPTH: "0"
+  
+# test:
+#   stage: test
+#   image: golang:1.25.0-alpine
+#   script:
+#     - go test ./... -coverprofile=coverage.out
+#   artifacts:
+#     paths:
+#       - coverage.out
+#   rules:
+#     - if: $CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{1,3}$/
+#     # - if: $CI_COMMIT_BRANCH == "main"
+#   allow_failure: false
+
+# sonarcloud-check:
+#   stage: test
+#   image:
+#     name: sonarsource/sonar-scanner-cli:latest
+#     entrypoint: [""]
+#   needs:
+#     - job: test
+#       artifacts: true
+#   cache:
+#     key: "${CI_JOB_NAME}"
+#     paths:
+#       - .sonar/cache
+#   script:
+#     - sonar-scanner -Dsonar.go.coverage.reportPaths=coverage.out
+#   rules:
+#     # - if: $CI_COMMIT_BRANCH == "main"
+#     - if: $CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{1,3}$/
+#     # - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+#   allow_failure: true
+
+build-refina-profile:
+  stage: build
+  image: docker:latest
+  # needs:
+  #   - job: sonarcloud-check 
+  services:
+    - docker:dind
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{1,3}$/
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    - echo "Building Refina Profile Backend Application..."
+    - docker build -t "$CI_REGISTRY_IMAGE/refina-profile:$TAG_IMAGE" .
+    - docker push "$CI_REGISTRY_IMAGE/refina-profile:$TAG_IMAGE"
+    - echo "$CI_JOB_ID" > refina-profile_build_job_id.txt
+  artifacts:
+    paths:
+      - refina-profile_build_job_id.txt
+
+build-migrate:
+  stage: build
+  image: docker:latest
+  # needs:
+  #   - job: sonarcloud-check 
+  services:
+    - docker:dind
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{1,3}$/
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    - echo "Building migration image..."
+    - docker build -f Dockerfile.migrate -t "$CI_REGISTRY_IMAGE/migrate:$TAG_IMAGE" .
+    - docker push "$CI_REGISTRY_IMAGE/migrate:$TAG_IMAGE"
+    - echo "$CI_JOB_ID" > migrate_build_job_id.txt
+  artifacts:  
+    paths:
+      - migrate_build_job_id.txt
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: build-refina-profile
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{1,3}$/
+  variables:
+    RELEASE_TITLE: "Release ${CI_COMMIT_TAG}"
+    RELEASE_DESC: "Tagged after commit ${CI_COMMIT_SHORT_SHA}, message ${CI_COMMIT_TAG_MESSAGE}"
+  script:
+    - export REFINA_PROFILE_JOB_ID="$(cat refina-profile_build_job_id.txt)"
+    - echo "create release ${CI_COMMIT_TAG} from jobs $REFINA_PROFILE_JOB_ID"
+    - release-cli create --name "${RELEASE_TITLE}" --description "${RELEASE_DESC}" --tag-name "${CI_COMMIT_TAG}"
+
+deploy-staging:
+  stage: deploy
+  image: alpine:latest
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{1,3}$/
+  before_script:
+    - "which ssh-agent || ( apk update && apk add --no-cache openssh)"
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+  script:
+    - |
+      ssh -p $SSH_PORT -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} "
+        export STG_REFINA_PROFILE_IMAGE="$CI_REGISTRY_IMAGE/refina-profile" &&
+        export STG_REFINA_PROFILE_IMAGE_TAG=$TAG_IMAGE &&
+
+        cd ~/web/staging/refinamicroservices &&
+
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+        docker compose -f docker-compose.yml pull stg-refina-profile &&
+        docker compose -f docker-compose.yml up -d stg-refina-profile
+      "
+
+deploy-production:
+  stage: deploy
+  image: alpine:latest
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{1,3}$/
+  before_script:
+    - "which ssh-agent || ( apk update && apk add --no-cache openssh)"
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+  script:
+    - |
+      ssh -p $SSH_PORT -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} " 
+        export PROD_REFINA_PROFILE_IMAGE="$CI_REGISTRY_IMAGE/refina-profile" &&
+        export PROD_REFINA_PROFILE_IMAGE_TAG=$TAG_IMAGE &&
+
+        cd ~/web/production/refinamicroservices &&
+
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+        docker compose -f docker-compose.yml pull prod-refina-profile &&
+        docker compose -f docker-compose.yml up -d prod-refina-profile
+      "
+  when: manual
+
+migrate-staging:
+  stage: migrate
+  image: alpine:latest
+  needs:
+    - job: build-migrate
+      artifacts: true
+    - job: deploy-staging
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{1,3}$/
+  before_script:
+    - "which ssh-agent || ( apk update && apk add --no-cache openssh)"
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+  script:
+    - |
+      ssh -p $SSH_PORT -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} "
+        export APP_IMAGE_STG_MIGRATE=\"$CI_REGISTRY_IMAGE/migrate\" &&
+        export APP_IMAGE_STG_MIGRATE_TAG=$TAG_IMAGE &&
+
+        cd ~/web/staging/refinamicroservices &&
+
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+        docker pull $CI_REGISTRY_IMAGE/migrate:$TAG_IMAGE &&
+        
+        echo 'Running database migration for staging environment...' &&
+        docker compose -f docker-compose.yml run --rm stg-refina-profile-migrate
+        
+        echo 'Migration completed for staging environment'
+      "
+  when: manual
+
+migrate-production:
+  stage: migrate
+  image: alpine:latest
+  needs:
+    - job: build-migrate
+      artifacts: true
+    - job: deploy-production
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]{4}\.[0-9]{1,3}$/
+  before_script:
+    - "which ssh-agent || ( apk update && apk add --no-cache openssh)"
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+  script:
+    - |
+      ssh -p $SSH_PORT -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} "
+        export APP_IMAGE_PROD_MIGRATE=\"$CI_REGISTRY_IMAGE/migrate\" &&
+        export APP_IMAGE_PROD_MIGRATE_TAG=$TAG_IMAGE &&
+
+        cd ~/web/production/refinamicroservices &&
+
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+        docker pull $CI_REGISTRY_IMAGE/migrate:$TAG_IMAGE &&
+        
+        echo 'Running database migration for production environment...' &&
+        docker compose -f docker-compose.yml run --rm prod-refina-profile-migrate
+
+        echo 'Migration completed for production environment'
+      "
+  when: manual
