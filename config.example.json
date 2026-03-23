@@ -18,7 +18,8 @@
       "USER": "",
       "PASSWORD": "",
       "MAX_OPEN_CONN_POOL": 10,
-      "USE_SSL": 0
+      "USE_SSL": 0,
+      "PUBLIC_URL": ""
     }
   }
 }

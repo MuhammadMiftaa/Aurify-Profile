@@ -30,6 +30,7 @@ type (
 		SecretKey   string `env:"MINIO_ROOT_PASSWORD"`
 		MaxOpenConn int    `env:"MINIO_MAX_OPEN_CONN"`
 		UseSSL      int    `env:"MINIO_USE_SSL"`
+		PublicURL   string `env:"MINIO_PUBLIC_URL"`
 	}
 
 	Config struct {
@@ -107,6 +108,11 @@ func LoadNative() ([]string, error) {
 			missing = append(missing, fmt.Sprintf("MINIO_USE_SSL must be int, got %s", val))
 		}
 	}
+	if val, ok := os.LookupEnv("MINIO_PUBLIC_URL"); !ok {
+		missing = append(missing, "MINIO_PUBLIC_URL env is not set")
+	} else {
+		Cfg.Minio.PublicURL = val
+	}
 	// ! ______________________________________________________
 
 	return missing, nil
@@ -171,6 +177,9 @@ func LoadByViper() ([]string, error) {
 	}
 	if Cfg.Minio.UseSSL = config.GetInt("OBJECT-STORAGE.MINIO.USE_SSL"); Cfg.Minio.UseSSL < 0 || Cfg.Minio.UseSSL > 1 {
 		missing = append(missing, "OBJECT-STORAGE.MINIO.USE_SSL env is not valid")
+	}
+	if Cfg.Minio.PublicURL = config.GetString("OBJECT-STORAGE.MINIO.PUBLIC_URL"); Cfg.Minio.PublicURL == "" {
+		missing = append(missing, "OBJECT-STORAGE.MINIO.PUBLIC_URL env is not set")
 	}
 	// ! ______________________________________________________
 

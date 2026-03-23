@@ -156,7 +156,7 @@ func (s *profileService) UploadPhoto(ctx context.Context, userID string, base64I
 	}
 
 	// Update profile with new photo URL
-	profile.PhotoURL = uploadResp.URL
+	profile.PhotoURL = miniofs.ReplaceURL(uploadResp.URL)
 	if err := s.repo.Update(ctx, profile); err != nil {
 		return nil, fmt.Errorf("failed to update profile: %w", err)
 	}
